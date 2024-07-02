@@ -60,6 +60,11 @@ namespace photon {
 
 constexpr const units::second_t VERSION_CHECK_INTERVAL = 5_s;
 static const std::vector<std::string_view> PHOTON_PREFIX = {"/photonvision/"};
+bool PhotonCamera::VERSION_CHECK_ENABLED = true;
+
+void PhotonCamera::SetVersionCheckEnabled(bool enabled) {
+  VERSION_CHECK_ENABLED = enabled;
+}
 
 PhotonCamera::PhotonCamera(nt::NetworkTableInstance instance,
                            const std::string_view cameraName)
@@ -154,20 +159,6 @@ LEDMode PhotonCamera::GetLEDMode() const {
   return static_cast<LEDMode>(static_cast<int>(ledModeSub.Get()));
 }
 
-std::optional<cv::Mat> PhotonCamera::GetCameraMatrix() {
-  auto camCoeffs = cameraIntrinsicsSubscriber.Get();
-  if (camCoeffs.size() == 9) {
-    cv::Mat retVal(3, 3, CV_64FC1);
-    for (int i = 0; i < 3; i++) {
-      for (int j = 0; j < 3; j++) {
-        retVal.at<double>(i, j) = camCoeffs[(j * 3) + i];
-      }
-    }
-    return retVal;
-  }
-  return std::nullopt;
-}
-
 void PhotonCamera::SetLEDMode(LEDMode mode) {
   ledModePub.Set(static_cast<int>(mode));
 }
@@ -176,20 +167,51 @@ const std::string_view PhotonCamera::GetCameraName() const {
   return cameraName;
 }
 
-std::optional<cv::Mat> PhotonCamera::GetDistCoeffs() {
-  auto distCoeffs = cameraDistortionSubscriber.Get();
-  if (distCoeffs.size() == 5) {
-    cv::Mat retVal(5, 1, CV_64FC1);
-    for (int i = 0; i < 5; i++) {
-      retVal.at<double>(i, 0) = distCoeffs[i];
-    }
+std::optional<PhotonCamera::CameraMatrix> PhotonCamera::GetCameraMatrix() {
+  auto camCoeffs = cameraIntrinsicsSubscriber.Get();
+  if (camCoeffs.size() == 9) {
+    PhotonCamera::CameraMatrix retVal =
+        Eigen::Map<const PhotonCamera::CameraMatrix>(camCoeffs.data());
     return retVal;
   }
   return std::nullopt;
 }
 
+std::optional<PhotonCamera::DistortionMatrix> PhotonCamera::GetDistCoeffs() {
+  auto distCoeffs = cameraDistortionSubscriber.Get();
+  auto bound = distCoeffs.size();
+  if (bound > 0 && bound <= 8) {
+    PhotonCamera::DistortionMatrix retVal =
+        PhotonCamera::DistortionMatrix::Zero();
+
+    Eigen::Map<const Eigen::VectorXd> map(distCoeffs.data(), bound);
+    retVal.block(0, 0, bound, 1) = map;
+
+    return retVal;
+  }
+  return std::nullopt;
+}
+
+static bool VersionMatches(std::string them_str) {
+  std::smatch match;
+  std::regex versionPattern{"v[0-9]+.[0-9]+.[0-9]+"};
+
+  std::string us_str = PhotonVersion::versionString;
+
+  // Check that both versions are in the right format
+  if (std::regex_search(us_str, match, versionPattern) &&
+      std::regex_search(them_str, match, versionPattern)) {
+    // If they are, check string equality
+    return (us_str == them_str);
+  } else {
+    return false;
+  }
+}
+
 void PhotonCamera::VerifyVersion() {
-  if (!PhotonCamera::VERSION_CHECK_ENABLED) return;
+  if (!PhotonCamera::VERSION_CHECK_ENABLED) {
+    return;
+  }
 
   if ((frc::Timer::GetFPGATimestamp() - lastVersionCheckTime) <
       VERSION_CHECK_INTERVAL)
