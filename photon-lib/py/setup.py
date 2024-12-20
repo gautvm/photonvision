@@ -1,5 +1,7 @@
-from setuptools import setup, find_packages
-import subprocess, re
+import re
+import subprocess
+
+from setuptools import find_packages, setup
 
 gitDescribeResult = (
     subprocess.check_output(["git", "describe", "--tags", "--match=v*", "--always"])
@@ -48,20 +50,21 @@ with open("photonlibpy/version.py", "w", encoding="utf-8") as fp:
     fp.write(f'PHOTONVISION_VERSION="{gitDescribeResult}"\n')
 
 
-descriptionStr = f"""
-Pure-python implementation of PhotonLib for interfacing with PhotonVision on coprocessors.
-Implemented with PhotonVision version {gitDescribeResult} .
-"""
+descriptionStr = f"Pure-python implementation of PhotonLib for interfacing with PhotonVision on coprocessors. Implemented with PhotonVision version {gitDescribeResult} ."
 
 setup(
     name="photonlibpy",
     packages=find_packages(),
+    package_data={"photonlibpy": ["py.typed"]},
     version=versionString,
     install_requires=[
-        "wpilib<2025,>=2024.0.0b2",
-        "robotpy-wpimath<2025,>=2024.0.0b2",
-        "robotpy-apriltag<2025,>=2024.0.0b2",
-        "pyntcore<2025,>=2024.0.0b2",
+        "numpy~=2.1",
+        "wpilib<2026,>=2025.0.0b1",
+        "robotpy-wpimath<2026,>=2025.0.0b1",
+        "robotpy-apriltag<2026,>=2025.0.0b1",
+        "robotpy-cscore<2026,>=2025.0.0b1",
+        "pyntcore<2026,>=2025.0.0b1",
+        "opencv-python;platform_machine!='roborio'",
     ],
     description=descriptionStr,
     url="https://photonvision.org",

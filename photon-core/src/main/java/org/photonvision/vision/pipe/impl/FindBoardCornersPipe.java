@@ -113,8 +113,14 @@ public class FindBoardCornersPipe
                             new Size(params.boardWidth, params.boardHeight),
                             (float) params.gridSize,
                             (float) params.markerSize,
-                            Objdetect.getPredefinedDictionary(params.tagFamily));
+                            Objdetect.getPredefinedDictionary(params.tagFamily.getValue()));
+            board.setLegacyPattern(params.useOldPattern);
             detector = new CharucoDetector(board);
+            detector.getDetectorParameters().set_adaptiveThreshConstant(10);
+            detector.getDetectorParameters().set_adaptiveThreshWinSizeMin(11);
+            detector.getDetectorParameters().set_adaptiveThreshWinSizeStep(40);
+            detector.getDetectorParameters().set_adaptiveThreshWinSizeMax(91);
+
         } else {
             logger.error("Can't create pattern for unknown board type " + params.type);
         }
@@ -309,6 +315,7 @@ public class FindBoardCornersPipe
                 }
 
                 outBoardCorners.fromArray(boardCorners);
+                objPts.fromArray(objectPoints);
                 outLevels.fromArray(levels);
             }
             imgPoints.release();
@@ -371,16 +378,18 @@ public class FindBoardCornersPipe
         final double gridSize;
         final double markerSize;
         final FrameDivisor divisor;
-        final int tagFamily;
+        final UICalibrationData.TagFamily tagFamily;
+        final boolean useOldPattern;
 
         public FindCornersPipeParams(
                 int boardHeight,
                 int boardWidth,
                 UICalibrationData.BoardType type,
-                int tagFamily,
+                UICalibrationData.TagFamily tagFamily,
                 double gridSize,
                 double markerSize,
-                FrameDivisor divisor) {
+                FrameDivisor divisor,
+                boolean useOldPattern) {
             this.boardHeight = boardHeight;
             this.boardWidth = boardWidth;
             this.tagFamily = tagFamily;
@@ -388,6 +397,7 @@ public class FindBoardCornersPipe
             this.gridSize = gridSize; // meter
             this.markerSize = markerSize; // meter
             this.divisor = divisor;
+            this.useOldPattern = useOldPattern;
         }
 
         @Override
@@ -412,6 +422,8 @@ public class FindBoardCornersPipe
             FindCornersPipeParams other = (FindCornersPipeParams) obj;
             if (boardHeight != other.boardHeight) return false;
             if (boardWidth != other.boardWidth) return false;
+            if (tagFamily != other.tagFamily) return false;
+            if (useOldPattern != other.useOldPattern) return false;
             if (type != other.type) return false;
             if (Double.doubleToLongBits(gridSize) != Double.doubleToLongBits(other.gridSize))
                 return false;

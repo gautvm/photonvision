@@ -40,7 +40,7 @@ const handleResolutionChange = (value: number) => {
   useCameraSettingsStore().changeCurrentPipelineSetting({ streamingFrameDivisor: getNumberOfSkippedDivisors() }, false);
   useCameraSettingsStore().currentPipelineSettings.streamingFrameDivisor = 0;
 
-  if (!useCameraSettingsStore().isCurrentVideoFormatCalibrated) {
+  if (!useCameraSettingsStore().isCurrentVideoFormatCalibrated && !useCameraSettingsStore().isDriverMode) {
     useCameraSettingsStore().changeCurrentPipelineSetting({ solvePNPEnabled: false }, true);
   }
 };
@@ -74,15 +74,15 @@ const interactiveCols = computed(() =>
 <template>
   <div>
     <pv-slider
-      v-model="useCameraSettingsStore().currentPipelineSettings.cameraExposure"
+      v-model="useCameraSettingsStore().currentPipelineSettings.cameraExposureRaw"
       :disabled="useCameraSettingsStore().currentCameraSettings.pipelineSettings.cameraAutoExposure"
       label="Exposure"
-      tooltip="Directly controls how much light is allowed to fall onto the sensor, which affects apparent brightness"
-      :min="0"
-      :max="100"
+      tooltip="Directly controls how long the camera shutter remains open. Units are dependant on the underlying driver."
+      :min="useCameraSettingsStore().minExposureRaw"
+      :max="useCameraSettingsStore().maxExposureRaw"
       :slider-cols="interactiveCols"
-      :step="0.1"
-      @input="(args) => useCameraSettingsStore().changeCurrentPipelineSetting({ cameraExposure: args }, false)"
+      :step="1"
+      @input="(args) => useCameraSettingsStore().changeCurrentPipelineSetting({ cameraExposureRaw: args }, false)"
     />
     <pv-slider
       v-model="useCameraSettingsStore().currentPipelineSettings.cameraBrightness"
@@ -130,32 +130,31 @@ const interactiveCols = computed(() =>
       tooltip="Controls blue automatic white balance gain, which affects how the camera captures colors in different conditions"
       @input="(args) => useCameraSettingsStore().changeCurrentPipelineSetting({ cameraBlueGain: args }, false)"
     />
-    <!-- Disable camera orientation as stop gap for Issue 1084 until calibration data gets rotated. https://github.com/PhotonVision/photonvision/issues/1084 -->
-    <v-banner
-      v-show="
-        useCameraSettingsStore().isCurrentVideoFormatCalibrated &&
-        useCameraSettingsStore().currentPipelineSettings.inputImageRotationMode != 0
-      "
-      rounded
-      dark
-      color="red"
-      text-color="white"
-      class="mt-3"
-      icon="mdi-alert-circle-outline"
-    >
-      Warning! A known bug affects rotation of calibrated camera. Turn off rotation here and rotate using
-      cameraToRobotTransform in your robot code.
-    </v-banner>
+
+    <pv-switch
+      v-model="useCameraSettingsStore().currentPipelineSettings.cameraAutoWhiteBalance"
+      class="pt-2"
+      label="Auto White Balance"
+      :switch-cols="interactiveCols"
+      tooltip="Enables or Disables camera automatic adjustment for current lighting conditions"
+      @input="(args) => useCameraSettingsStore().changeCurrentPipelineSetting({ cameraAutoWhiteBalance: args }, false)"
+    />
+    <pv-slider
+      v-if="!useCameraSettingsStore().currentPipelineSettings.cameraAutoWhiteBalance"
+      v-model="useCameraSettingsStore().currentPipelineSettings.cameraWhiteBalanceTemp"
+      label="White Balance Temperature"
+      :min="useCameraSettingsStore().minWhiteBalanceTemp"
+      :max="useCameraSettingsStore().maxWhiteBalanceTemp"
+      :slider-cols="interactiveCols"
+      @input="(args) => useCameraSettingsStore().changeCurrentPipelineSetting({ cameraWhiteBalanceTemp: args }, false)"
+    />
+
     <pv-select
       v-model="useCameraSettingsStore().currentPipelineSettings.inputImageRotationMode"
       label="Orientation"
       tooltip="Rotates the camera stream. Rotation not available when camera has been calibrated."
       :items="cameraRotations"
       :select-cols="interactiveCols"
-      :disabled="
-        useCameraSettingsStore().isCurrentVideoFormatCalibrated &&
-        useCameraSettingsStore().currentPipelineSettings.inputImageRotationMode == 0
-      "
       @input="(args) => useCameraSettingsStore().changeCurrentPipelineSetting({ inputImageRotationMode: args }, false)"
     />
     <pv-select

@@ -265,7 +265,7 @@ public class SqlConfigProvider extends ConfigProvider {
                         JacksonUtils.deserialize(
                                 getOneConfigFile(conn, GlobalKeys.HARDWARE_CONFIG), HardwareConfig.class);
             } catch (IOException e) {
-                logger.error("Could not deserialize hardware config! Loading defaults");
+                logger.error("Could not deserialize hardware config! Loading defaults", e);
                 hardwareConfig = new HardwareConfig();
             }
 
@@ -274,7 +274,7 @@ public class SqlConfigProvider extends ConfigProvider {
                         JacksonUtils.deserialize(
                                 getOneConfigFile(conn, GlobalKeys.HARDWARE_SETTINGS), HardwareSettings.class);
             } catch (IOException e) {
-                logger.error("Could not deserialize hardware settings! Loading defaults");
+                logger.error("Could not deserialize hardware settings! Loading defaults", e);
                 hardwareSettings = new HardwareSettings();
             }
 
@@ -283,7 +283,7 @@ public class SqlConfigProvider extends ConfigProvider {
                         JacksonUtils.deserialize(
                                 getOneConfigFile(conn, GlobalKeys.NETWORK_CONFIG), NetworkConfig.class);
             } catch (IOException e) {
-                logger.error("Could not deserialize network config! Loading defaults");
+                logger.error("Could not deserialize network config! Loading defaults", e);
                 networkConfig = new NetworkConfig();
             }
 
@@ -292,9 +292,9 @@ public class SqlConfigProvider extends ConfigProvider {
                         JacksonUtils.deserialize(
                                 getOneConfigFile(conn, GlobalKeys.ATFL_CONFIG_FILE), AprilTagFieldLayout.class);
             } catch (IOException e) {
-                logger.error("Could not deserialize apriltag layout! Loading defaults");
+                logger.error("Could not deserialize apriltag layout! Loading defaults", e);
                 try {
-                    atfl = AprilTagFields.kDefaultField.loadAprilTagLayoutField();
+                    atfl = AprilTagFieldLayout.loadField(AprilTagFields.kDefaultField);
                 } catch (UncheckedIOException e2) {
                     logger.error("Error loading WPILib field", e);
                     atfl = null;
@@ -349,6 +349,19 @@ public class SqlConfigProvider extends ConfigProvider {
 
     private void saveCameras(Connection conn) {
         try {
+            // Delete all cameras we don't need anymore
+            String deleteExtraCamsString =
+                    String.format(
+                            "DELETE FROM %s WHERE %s not in (%s)",
+                            Tables.CAMERAS,
+                            Columns.CAM_UNIQUE_NAME,
+                            config.getCameraConfigurations().keySet().stream()
+                                    .map(it -> "\"" + it + "\"")
+                                    .collect(Collectors.joining(", ")));
+
+            var stmt = conn.createStatement();
+            stmt.executeUpdate(deleteExtraCamsString);
+
             // Replace this camera's row with the new settings
             var sqlString =
                     String.format(
@@ -388,6 +401,7 @@ public class SqlConfigProvider extends ConfigProvider {
 
                 statement.executeUpdate();
             }
+
         } catch (SQLException | IOException e) {
             logger.error("Err saving cameras", e);
             try {
@@ -585,9 +599,9 @@ public class SqlConfigProvider extends ConfigProvider {
                                 result.getString(Columns.CAM_PIPELINE_JSONS), dummyList.getClass());
 
                 List<CVPipelineSettings> loadedSettings = new ArrayList<>();
-                for (var str : pipelineSettings) {
-                    if (str instanceof String) {
-                        loadedSettings.add(JacksonUtils.deserialize((String) str, CVPipelineSettings.class));
+                for (var setting : pipelineSettings) {
+                    if (setting instanceof String str) {
+                        loadedSettings.add(JacksonUtils.deserialize(str, CVPipelineSettings.class));
                     }
                 }
 

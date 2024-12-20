@@ -17,6 +17,7 @@
 
 package org.photonvision;
 
+import edu.wpi.first.hal.HAL;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -30,8 +31,10 @@ import org.photonvision.common.configuration.ConfigManager;
 import org.photonvision.common.configuration.NeuralNetworkModelManager;
 import org.photonvision.common.dataflow.networktables.NetworkTablesManager;
 import org.photonvision.common.hardware.HardwareManager;
+import org.photonvision.common.hardware.OsImageVersion;
 import org.photonvision.common.hardware.PiVersion;
 import org.photonvision.common.hardware.Platform;
+import org.photonvision.common.logging.KernelLogLogger;
 import org.photonvision.common.logging.LogGroup;
 import org.photonvision.common.logging.LogLevel;
 import org.photonvision.common.logging.Logger;
@@ -39,6 +42,7 @@ import org.photonvision.common.logging.PvCSCoreLogger;
 import org.photonvision.common.networking.NetworkManager;
 import org.photonvision.common.util.TestUtils;
 import org.photonvision.common.util.numbers.IntegerCouple;
+import org.photonvision.jni.PhotonTargetingJniLoader;
 import org.photonvision.jni.RknnDetectorJNI;
 import org.photonvision.mrcal.MrCalJNILoader;
 import org.photonvision.raspi.LibCameraJNILoader;
@@ -347,6 +351,31 @@ public class Main {
     }
 
     public static void main(String[] args) {
+        logger.info(
+                "Starting PhotonVision version "
+                        + PhotonVersion.versionString
+                        + " on platform "
+                        + Platform.getPlatformName()
+                        + (Platform.isRaspberryPi() ? (" (Pi " + PiVersion.getPiVersion() + ")") : ""));
+
+        if (OsImageVersion.IMAGE_VERSION.isPresent()) {
+            logger.info("PhotonVision image version: " + OsImageVersion.IMAGE_VERSION.get());
+        }
+
+        try {
+            if (!handleArgs(args)) {
+                System.exit(1);
+            }
+        } catch (ParseException e) {
+            logger.error("Failed to parse command-line options!", e);
+        }
+
+        // We don't want to trigger an exit in test mode or smoke test. This is specifically for MacOS.
+        if (!(Platform.isSupported() || isSmoketest || isTestMode)) {
+            logger.error("This platform is unsupported!");
+            System.exit(1);
+        }
+
         try {
             boolean success = TestUtils.loadLibraries();
 
@@ -358,7 +387,25 @@ public class Main {
             logger.error("Failed to load native libraries!", e);
             System.exit(1);
         }
-        logger.info("Native libraries loaded.");
+        logger.info("WPI JNI libraries loaded.");
+
+        try {
+            boolean success = PhotonTargetingJniLoader.load();
+
+            if (!success) {
+                logger.error("Failed to load native libraries! Giving up :(");
+                System.exit(1);
+            }
+        } catch (Exception e) {
+            logger.error("Failed to load photon-targeting JNI!", e);
+            System.exit(1);
+        }
+        logger.info("photon-targeting JNI libraries loaded.");
+
+        if (!HAL.initialize(500, 0)) {
+            logger.error("Failed to initialize the HAL! Giving up :(");
+            System.exit(1);
+        }
 
         try {
             if (Platform.isRaspberryPi()) {
@@ -384,13 +431,6 @@ public class Main {
                             + e.getMessage());
         }
 
-        try {
-            if (!handleArgs(args)) {
-                System.exit(0);
-            }
-        } catch (ParseException e) {
-            logger.error("Failed to parse command-line options!", e);
-        }
         CVMat.enablePrint(false);
         PipelineProfiler.enablePrint(false);
 
@@ -403,18 +443,20 @@ public class Main {
         Logger.setLevel(LogGroup.General, logLevel);
         logger.info("Logging initialized in debug mode.");
 
-        logger.info(
-                "Starting PhotonVision version "
-                        + PhotonVersion.versionString
-                        + " on "
-                        + Platform.getPlatformName()
-                        + (Platform.isRaspberryPi() ? (" (Pi " + PiVersion.getPiVersion() + ")") : ""));
+        // Add Linux kernel log->Photon logger
+        KernelLogLogger.getInstance();
 
+        // Add CSCore->Photon logger
         PvCSCoreLogger.getInstance();
 
         logger.debug("Loading ConfigManager...");
         ConfigManager.getInstance().load(); // init config manager
         ConfigManager.getInstance().requestSave();
+
+        logger.info("Loading ML models...");
+        var modelManager = NeuralNetworkModelManager.getInstance();
+        modelManager.extractModels(ConfigManager.getInstance().getModelsDirectory());
+        modelManager.discoverModels(ConfigManager.getInstance().getModelsDirectory());
 
         logger.debug("Loading HardwareManager...");
         // Force load the hardware manager
@@ -426,10 +468,7 @@ public class Main {
         logger.debug("Loading NetworkTablesManager...");
         NetworkTablesManager.getInstance()
                 .setConfig(ConfigManager.getInstance().getConfig().getNetworkConfig());
-
-        logger.info("Loading ML models");
-        NeuralNetworkModelManager.getInstance()
-                .initialize(ConfigManager.getInstance().getModelsDirectory());
+        NetworkTablesManager.getInstance().registerTimedTasks();
 
         if (isSmoketest) {
             logger.info("PhotonVision base functionality loaded -- smoketest complete");

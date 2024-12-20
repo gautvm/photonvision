@@ -18,6 +18,7 @@
 package org.photonvision.vision.pipeline;
 
 import edu.wpi.first.math.util.Units;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -69,11 +70,11 @@ public class Calibrate3dPipeline
 
     private static final FrameThresholdType PROCESSING_TYPE = FrameThresholdType.NONE;
 
-    public Calibrate3dPipeline(String uniqueName) {
-        this(12, uniqueName);
+    public Calibrate3dPipeline() {
+        this(12);
     }
 
-    public Calibrate3dPipeline(int minSnapshots, String uniqueName) {
+    public Calibrate3dPipeline(int minSnapshots) {
         super(PROCESSING_TYPE);
         this.settings = new Calibration3dPipelineSettings();
         this.foundCornersList = new ArrayList<>();
@@ -90,7 +91,8 @@ public class Calibrate3dPipeline
                         settings.tagFamily,
                         settings.gridSize,
                         settings.markerSize,
-                        settings.streamingFrameDivisor);
+                        settings.streamingFrameDivisor,
+                        settings.useOldPattern);
         findBoardCornersPipe.setParams(findCornersPipeParams);
 
         Calibrate3dPipe.CalibratePipeParams calibratePipeParams =
@@ -173,7 +175,7 @@ public class Calibrate3dPipeline
         return foundCornersList.size() >= minSnapshots;
     }
 
-    public CameraCalibrationCoefficients tryCalibration() {
+    public CameraCalibrationCoefficients tryCalibration(Path imageSavePath) {
         if (!hasEnough()) {
             logger.info(
                     "Not enough snapshots! Only got "
@@ -192,7 +194,8 @@ public class Calibrate3dPipeline
          * and returns the corresponding image and object points
          */
         calibrationOutput =
-                calibrate3dPipe.run(new CalibrationInput(foundCornersList, frameStaticProperties));
+                calibrate3dPipe.run(
+                        new CalibrationInput(foundCornersList, frameStaticProperties, imageSavePath));
 
         this.calibrating = false;
 
@@ -227,7 +230,8 @@ public class Calibrate3dPipeline
                                 settings.boardWidth,
                                 settings.boardHeight,
                                 settings.boardType,
-                                settings.useMrCal));
+                                settings.useOldPattern,
+                                settings.tagFamily));
 
         DataChangeService.getInstance()
                 .publishEvent(OutgoingUIEvent.wrappedOf("calibrationData", state));

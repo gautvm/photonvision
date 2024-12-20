@@ -7,7 +7,8 @@ export interface GeneralSettings {
   hardwareModel?: string;
   hardwarePlatform?: string;
   mrCalWorking: boolean;
-  rknnSupported: boolean;
+  availableModels: Record<string, string[]>;
+  supportedBackends: string[];
 }
 
 export interface MetricData {
@@ -71,6 +72,7 @@ export enum LogLevel {
 export interface LogMessage {
   level: LogLevel;
   message: string;
+  timestamp: Date;
 }
 
 export interface Resolution {
@@ -140,7 +142,7 @@ export interface CameraCalibrationResult {
   distCoeffs: JsonMatOfDouble;
   observations: BoardObservation[];
   calobjectWarp?: number[];
-  // We might have to omit observations for bandwith, so backend will send us this
+  // We might have to omit observations for bandwidth, so backend will send us this
   numSnapshots: number;
   meanErrors: number[];
 }
@@ -148,14 +150,18 @@ export interface CameraCalibrationResult {
 export enum ValidQuirks {
   AWBGain = "AWBGain",
   AdjustableFocus = "AdjustableFocus",
-  ArduOV9281 = "ArduOV9281",
-  ArduOV2311 = "ArduOV2311",
+  InnoOV9281Controls = "InnoOV9281Controls",
+  ArduOV9281Controls = "ArduOV9281Controls",
+  ArduOV2311Controls = "ArduOV2311Controls",
+  ArduOV9782Controls = "ArduOV9782Controls",
   ArduCamCamera = "ArduCamCamera",
   CompletelyBroken = "CompletelyBroken",
   FPSCap100 = "FPSCap100",
   Gain = "Gain",
   PiCam = "PiCam",
-  StickyFPS = "StickyFPS"
+  StickyFPS = "StickyFPS",
+  LifeCamControls = "LifeCamControls",
+  PsEyeControls = "PsEyeControls"
 }
 
 export interface QuirkyCamera {
@@ -189,6 +195,12 @@ export interface CameraSettings {
 
   cameraQuirks: QuirkyCamera;
   isCSICamera: boolean;
+
+  minExposureRaw: number;
+  maxExposureRaw: number;
+
+  minWhiteBalanceTemp: number;
+  maxWhiteBalanceTemp: number;
 }
 
 export interface CameraSettingsChangeRequest {
@@ -277,22 +289,37 @@ export const PlaceholderCameraSettings: CameraSettings = {
     quirks: {
       AWBGain: false,
       AdjustableFocus: false,
-      ArduOV9281: false,
-      ArduOV2311: false,
+      ArduOV9281Controls: false,
+      ArduOV2311Controls: false,
+      ArduOV9782Controls: false,
       ArduCamCamera: false,
       CompletelyBroken: false,
       FPSCap100: false,
       Gain: false,
       PiCam: false,
-      StickyFPS: false
+      StickyFPS: false,
+      InnoOV9281Controls: false,
+      LifeCamControls: false,
+      PsEyeControls: false
     }
   },
-  isCSICamera: false
+  isCSICamera: false,
+  minExposureRaw: 1,
+  maxExposureRaw: 100,
+  minWhiteBalanceTemp: 2000,
+  maxWhiteBalanceTemp: 10000
 };
 
 export enum CalibrationBoardTypes {
   Chessboard = 0,
   Charuco = 1
+}
+
+export enum CalibrationTagFamilies {
+  Dict_4X4_1000 = 0,
+  Dict_5X5_1000 = 1,
+  Dict_6X6_1000 = 2,
+  Dict_7X7_1000 = 3
 }
 
 export enum RobotOffsetType {

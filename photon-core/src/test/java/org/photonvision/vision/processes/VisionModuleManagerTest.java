@@ -18,8 +18,10 @@
 package org.photonvision.vision.processes;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 import edu.wpi.first.cscore.VideoMode;
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -31,7 +33,9 @@ import org.photonvision.common.configuration.CameraConfiguration;
 import org.photonvision.common.configuration.ConfigManager;
 import org.photonvision.common.dataflow.CVPipelineResultConsumer;
 import org.photonvision.common.util.TestUtils;
-import org.photonvision.vision.camera.USBCameraSource;
+import org.photonvision.jni.PhotonTargetingJniLoader;
+import org.photonvision.vision.camera.QuirkyCamera;
+import org.photonvision.vision.camera.USBCameras.USBCameraSource;
 import org.photonvision.vision.frame.FrameProvider;
 import org.photonvision.vision.frame.FrameStaticProperties;
 import org.photonvision.vision.frame.provider.FileFrameProvider;
@@ -40,7 +44,16 @@ import org.photonvision.vision.pipeline.result.CVPipelineResult;
 public class VisionModuleManagerTest {
     @BeforeAll
     public static void init() {
+        String classpathStr = System.getProperty("java.class.path");
+        System.out.print(classpathStr);
+
         TestUtils.loadLibraries();
+        try {
+            if (!PhotonTargetingJniLoader.load()) fail();
+        } catch (UnsatisfiedLinkError | IOException e) {
+            e.printStackTrace();
+            fail(e);
+        }
     }
 
     private static class TestSource extends VisionSource {
@@ -49,6 +62,8 @@ public class VisionModuleManagerTest {
         public TestSource(FrameProvider provider, CameraConfiguration cameraConfiguration) {
             super(cameraConfiguration);
             this.provider = provider;
+            if (getCameraConfiguration().cameraQuirks == null)
+                getCameraConfiguration().cameraQuirks = QuirkyCamera.DefaultCamera;
         }
 
         @Override
@@ -65,6 +80,16 @@ public class VisionModuleManagerTest {
         public boolean isVendorCamera() {
             return false;
         }
+
+        @Override
+        public boolean hasLEDs() {
+            return false;
+        }
+
+        @Override
+        public void remakeSettables() {
+            return;
+        }
     }
 
     private static class TestSettables extends VisionSourceSettables {
@@ -73,7 +98,7 @@ public class VisionModuleManagerTest {
         }
 
         @Override
-        public void setExposure(double exposure) {}
+        public void setExposureRaw(double exposure) {}
 
         @Override
         public void setBrightness(int brightness) {}
@@ -100,6 +125,32 @@ public class VisionModuleManagerTest {
 
         @Override
         public void setAutoExposure(boolean cameraAutoExposure) {}
+
+        @Override
+        public double getMinExposureRaw() {
+            return 1;
+        }
+
+        @Override
+        public double getMaxExposureRaw() {
+            return 1234;
+        }
+
+        @Override
+        public void setAutoWhiteBalance(boolean autowb) {}
+
+        @Override
+        public void setWhiteBalanceTemp(double temp) {}
+
+        @Override
+        public double getMaxWhiteBalanceTemp() {
+            return 1;
+        }
+
+        @Override
+        public double getMinWhiteBalanceTemp() {
+            return 2;
+        }
     }
 
     private static class TestDataConsumer implements CVPipelineResultConsumer {
@@ -168,10 +219,10 @@ public class VisionModuleManagerTest {
 
         // Arducam OV9281 UC844 raspberry pi test.
         var conf4 = new CameraConfiguration("Left", "dev/video1");
-        USBCameraSource usbSimulation = new USBCameraSource(conf4, 0x6366, 0x0c45, true);
+        USBCameraSource usbSimulation = new MockUsbCameraSource(conf4, 0x6366, 0x0c45);
 
         var conf5 = new CameraConfiguration("Right", "dev/video2");
-        USBCameraSource usbSimulation2 = new USBCameraSource(conf5, 0x6366, 0x0c45, true);
+        USBCameraSource usbSimulation2 = new MockUsbCameraSource(conf5, 0x6366, 0x0c45);
 
         var modules =
                 vmm.addSources(

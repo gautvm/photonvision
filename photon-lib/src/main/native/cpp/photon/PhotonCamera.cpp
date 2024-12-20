@@ -25,14 +25,18 @@
 #include "photon/PhotonCamera.h"
 
 #include <hal/FRCUsageReporting.h>
+#include <net/TimeSyncServer.h>
 
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include <frc/Errors.h>
 #include <frc/RobotController.h>
 #include <frc/Timer.h>
 #include <opencv2/core.hpp>
 #include <opencv2/core/mat.hpp>
+#include <wpi/json.h>
 
 #include "PhotonVersion.h"
 #include "photon/dataflow/structures/Packet.h"
@@ -56,10 +60,35 @@ inline constexpr std::string_view bfw =
     ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n"
     "\n\n";
 
+// bit of a hack -- start a TimeSync server on port 5810 (hard-coded). We want
+// to avoid calling this from static initialization
+static void InitTspServer() {
+  // We dont impose requirements about not calling the PhotonCamera constructor
+  // from different threads, so i guess we need this?
+  static std::mutex g_timeSyncServerMutex;
+  static bool g_timeSyncServerStarted{false};
+  static wpi::tsp::TimeSyncServer timesyncServer{5810};
+
+  std::lock_guard lock{g_timeSyncServerMutex};
+  if (!g_timeSyncServerStarted) {
+    timesyncServer.Start();
+    g_timeSyncServerStarted = true;
+  }
+}
+
 namespace photon {
 
 constexpr const units::second_t VERSION_CHECK_INTERVAL = 5_s;
 static const std::vector<std::string_view> PHOTON_PREFIX = {"/photonvision/"};
+bool PhotonCamera::VERSION_CHECK_ENABLED = true;
+
+void PhotonCamera::SetVersionCheckEnabled(bool enabled) {
+  VERSION_CHECK_ENABLED = enabled;
+}
+
+static const std::string TYPE_STRING =
+    std::string{"photonstruct:PhotonPipelineResult:"} +
+    std::string{SerdeType<PhotonPipelineResult>::GetSchemaHash()};
 
 PhotonCamera::PhotonCamera(nt::NetworkTableInstance instance,
                            const std::string_view cameraName)
@@ -67,7 +96,9 @@ PhotonCamera::PhotonCamera(nt::NetworkTableInstance instance,
       rootTable(mainTable->GetSubTable(cameraName)),
       rawBytesEntry(
           rootTable->GetRawTopic("rawBytes")
-              .Subscribe("rawBytes", {}, {.periodic = 0.01, .sendAll = true})),
+              .Subscribe(
+                  TYPE_STRING, {},
+                  {.pollStorage = 20, .periodic = 0.01, .sendAll = true})),
       inputSaveImgEntry(
           rootTable->GetIntegerTopic("inputSaveImgCmd").Publish()),
       inputSaveImgSubscriber(
@@ -96,6 +127,11 @@ PhotonCamera::PhotonCamera(nt::NetworkTableInstance instance,
       cameraName(cameraName) {
   HAL_Report(HALUsageReporting::kResourceType_PhotonCamera, InstanceCount);
   InstanceCount++;
+
+  // The Robot class is actually created here:
+  // https://github.com/wpilibsuite/allwpilib/blob/811b1309683e930a1ce69fae818f943ff161b7a5/wpilibc/src/main/native/include/frc/RobotBase.h#L33
+  // so we should be fine to call this from the ctor
+  InitTspServer();
 }
 
 PhotonCamera::PhotonCamera(const std::string_view cameraName)
@@ -103,31 +139,65 @@ PhotonCamera::PhotonCamera(const std::string_view cameraName)
 
 PhotonPipelineResult PhotonCamera::GetLatestResult() {
   if (test) {
+    if (testResult.size())
+      return testResult.back();
+    else
+      return PhotonPipelineResult{};
+  }
+
+  // Prints warning if not connected
+  VerifyVersion();
+
+  // Fill the packet with latest data and populate result.
+  units::microsecond_t now =
+      units::microsecond_t(frc::RobotController::GetFPGATime());
+  const auto value = rawBytesEntry.Get();
+  if (!value.size()) return PhotonPipelineResult{};
+
+  photon::Packet packet{value};
+
+  // Create the new result;
+  PhotonPipelineResult result = packet.Unpack<PhotonPipelineResult>();
+
+  result.SetReceiveTimestamp(now);
+
+  return result;
+}
+
+std::vector<PhotonPipelineResult> PhotonCamera::GetAllUnreadResults() {
+  if (test) {
     return testResult;
   }
 
   // Prints warning if not connected
   VerifyVersion();
 
-  // Clear the current packet.
-  packet.Clear();
+  const auto changes = rawBytesEntry.ReadQueue();
 
-  // Create the new result;
-  PhotonPipelineResult result;
+  // Create the new result list
+  std::vector<PhotonPipelineResult> ret;
+  ret.reserve(changes.size());
 
-  // Fill the packet with latest data and populate result.
-  units::microsecond_t now =
-      units::microsecond_t(frc::RobotController::GetFPGATime());
-  const auto value = rawBytesEntry.Get();
-  if (!value.size()) return result;
+  for (size_t i = 0; i < changes.size(); i++) {
+    const nt::Timestamped<std::vector<uint8_t>>& value = changes[i];
 
-  photon::Packet packet{value};
+    if (!value.value.size() || value.time == 0) {
+      continue;
+    }
 
-  packet >> result;
+    // Fill the packet with latest data and populate result.
+    photon::Packet packet{value.value};
+    auto result = packet.Unpack<PhotonPipelineResult>();
 
-  result.SetRecieveTimestamp(now);
+    // TODO: NT4 timestamps are still not to be trusted. But it's the best we
+    // can do until we can make time sync more reliable.
+    result.SetReceiveTimestamp(units::microsecond_t(value.time) -
+                               result.GetLatency());
 
-  return result;
+    ret.push_back(result);
+  }
+
+  return ret;
 }
 
 void PhotonCamera::SetDriverMode(bool driverMode) {
@@ -154,20 +224,6 @@ LEDMode PhotonCamera::GetLEDMode() const {
   return static_cast<LEDMode>(static_cast<int>(ledModeSub.Get()));
 }
 
-std::optional<cv::Mat> PhotonCamera::GetCameraMatrix() {
-  auto camCoeffs = cameraIntrinsicsSubscriber.Get();
-  if (camCoeffs.size() == 9) {
-    cv::Mat retVal(3, 3, CV_64FC1);
-    for (int i = 0; i < 3; i++) {
-      for (int j = 0; j < 3; j++) {
-        retVal.at<double>(i, j) = camCoeffs[(j * 3) + i];
-      }
-    }
-    return retVal;
-  }
-  return std::nullopt;
-}
-
 void PhotonCamera::SetLEDMode(LEDMode mode) {
   ledModePub.Set(static_cast<int>(mode));
 }
@@ -176,20 +232,37 @@ const std::string_view PhotonCamera::GetCameraName() const {
   return cameraName;
 }
 
-std::optional<cv::Mat> PhotonCamera::GetDistCoeffs() {
+std::optional<PhotonCamera::CameraMatrix> PhotonCamera::GetCameraMatrix() {
+  auto camCoeffs = cameraIntrinsicsSubscriber.Get();
+  if (camCoeffs.size() == 9) {
+    PhotonCamera::CameraMatrix retVal =
+        Eigen::Map<const Eigen::Matrix<double, 3, 3, Eigen::RowMajor>>(
+            camCoeffs.data());
+    return retVal;
+  }
+
+  return std::nullopt;
+}
+
+std::optional<PhotonCamera::DistortionMatrix> PhotonCamera::GetDistCoeffs() {
   auto distCoeffs = cameraDistortionSubscriber.Get();
-  if (distCoeffs.size() == 5) {
-    cv::Mat retVal(5, 1, CV_64FC1);
-    for (int i = 0; i < 5; i++) {
-      retVal.at<double>(i, 0) = distCoeffs[i];
-    }
+  auto bound = distCoeffs.size();
+  if (bound > 0 && bound <= 8) {
+    PhotonCamera::DistortionMatrix retVal =
+        PhotonCamera::DistortionMatrix::Zero();
+
+    Eigen::Map<const Eigen::VectorXd> map(distCoeffs.data(), bound);
+    retVal.block(0, 0, bound, 1) = map;
+
     return retVal;
   }
   return std::nullopt;
 }
 
 void PhotonCamera::VerifyVersion() {
-  if (!PhotonCamera::VERSION_CHECK_ENABLED) return;
+  if (!PhotonCamera::VERSION_CHECK_ENABLED) {
+    return;
+  }
 
   if ((frc::Timer::GetFPGATimestamp() - lastVersionCheckTime) <
       VERSION_CHECK_INTERVAL)
@@ -215,20 +288,36 @@ void PhotonCamera::VerifyVersion() {
 
       std::string cameraNameOutString;
       for (unsigned int i = 0; i < cameraNames.size(); i++) {
-        cameraNameOutString += "\n" + cameraNames[i];
+        cameraNameOutString += ("\n" + cameraNames[i]);
       }
       FRC_ReportError(
           frc::warn::Warning,
-          "Found the following PhotonVision cameras on NetworkTables:{}",
+          "Found the following PhotonVision cameras on NetworkTables:\n{}",
           cameraNameOutString);
     }
-  } else if (!VersionMatches(versionString)) {
-    FRC_ReportError(frc::warn::Warning, bfw);
-    std::string error_str = fmt::format(
-        "Photonlib version {} does not match coprocessor version {}!",
-        PhotonVersion::versionString, versionString);
-    FRC_ReportError(frc::err::Error, "{}", error_str);
-    throw std::runtime_error(error_str);
+  } else {
+    std::string local_uuid{SerdeType<PhotonPipelineResult>::GetSchemaHash()};
+
+    // implicit conversion here might throw an exception, so be careful of that
+    wpi::json remote_uuid_json =
+        rawBytesEntry.GetTopic().GetProperty("message_uuid");
+    if (!remote_uuid_json.is_string()) {
+      FRC_ReportError(frc::warn::Warning,
+                      "Cannot find property message_uuid for PhotonCamera {}",
+                      path);
+      return;
+    }
+    std::string remote_uuid{remote_uuid_json};
+
+    if (local_uuid != remote_uuid) {
+      FRC_ReportError(frc::warn::Warning, bfw);
+      std::string error_str = fmt::format(
+          "Photonlib version {} (message definition version {}) does not match "
+          "coprocessor version {} (message definition version {})!",
+          PhotonVersion::versionString, local_uuid, versionString, remote_uuid);
+      FRC_ReportError(frc::err::Error, "{}", error_str);
+      throw std::runtime_error(error_str);
+    }
   }
 }
 

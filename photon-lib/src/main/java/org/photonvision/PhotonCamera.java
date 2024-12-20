@@ -32,9 +32,7 @@ import edu.wpi.first.math.Nat;
 import edu.wpi.first.math.numbers.*;
 import edu.wpi.first.networktables.BooleanPublisher;
 import edu.wpi.first.networktables.BooleanSubscriber;
-import edu.wpi.first.networktables.DoubleArrayPublisher;
 import edu.wpi.first.networktables.DoubleArraySubscriber;
-import edu.wpi.first.networktables.DoublePublisher;
 import edu.wpi.first.networktables.IntegerEntry;
 import edu.wpi.first.networktables.IntegerPublisher;
 import edu.wpi.first.networktables.IntegerSubscriber;
@@ -44,14 +42,16 @@ import edu.wpi.first.networktables.NetworkTableInstance;
 import edu.wpi.first.networktables.PubSubOption;
 import edu.wpi.first.networktables.StringSubscriber;
 import edu.wpi.first.wpilibj.DriverStation;
-import edu.wpi.first.wpilibj.RobotController;
 import edu.wpi.first.wpilibj.Timer;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
 import org.photonvision.common.hardware.VisionLEDMode;
 import org.photonvision.common.networktables.PacketSubscriber;
 import org.photonvision.targeting.PhotonPipelineResult;
+import org.photonvision.timesync.TimeSyncSingleton;
 
 /** Represents a camera that is connected to PhotonVision. */
 public class PhotonCamera implements AutoCloseable {
@@ -62,13 +62,6 @@ public class PhotonCamera implements AutoCloseable {
     PacketSubscriber<PhotonPipelineResult> resultSubscriber;
     BooleanPublisher driverModePublisher;
     BooleanSubscriber driverModeSubscriber;
-    DoublePublisher latencyMillisEntry;
-    BooleanPublisher hasTargetEntry;
-    DoublePublisher targetPitchEntry;
-    DoublePublisher targetYawEntry;
-    DoublePublisher targetAreaEntry;
-    DoubleArrayPublisher targetPoseEntry;
-    DoublePublisher targetSkewEntry;
     StringSubscriber versionEntry;
     IntegerEntry inputSaveImgEntry, outputSaveImgEntry;
     IntegerPublisher pipelineIndexRequest, ledModeRequest;
@@ -84,13 +77,6 @@ public class PhotonCamera implements AutoCloseable {
         resultSubscriber.close();
         driverModePublisher.close();
         driverModeSubscriber.close();
-        latencyMillisEntry.close();
-        hasTargetEntry.close();
-        targetPitchEntry.close();
-        targetYawEntry.close();
-        targetAreaEntry.close();
-        targetPoseEntry.close();
-        targetSkewEntry.close();
         versionEntry.close();
         inputSaveImgEntry.close();
         outputSaveImgEntry.close();
@@ -109,11 +95,14 @@ public class PhotonCamera implements AutoCloseable {
 
     private static boolean VERSION_CHECK_ENABLED = true;
     private static long VERSION_CHECK_INTERVAL = 5;
-    private double lastVersionCheckTime = 0;
+    double lastVersionCheckTime = 0;
 
     private long prevHeartbeatValue = -1;
     private double prevHeartbeatChangeTime = 0;
     private static final double HEARTBEAT_DEBOUNCE_SEC = 0.5;
+
+    double prevTimeSyncWarnTime = 0;
+    private static final double WARN_DEBOUNCE_SEC = 5;
 
     public static void setVersionCheckEnabled(boolean enabled) {
         VERSION_CHECK_ENABLED = enabled;
@@ -136,10 +125,12 @@ public class PhotonCamera implements AutoCloseable {
                 cameraTable
                         .getRawTopic("rawBytes")
                         .subscribe(
-                                "rawBytes", new byte[] {}, PubSubOption.periodic(0.01), PubSubOption.sendAll(true));
-        resultSubscriber =
-                new PacketSubscriber<>(
-                        rawBytesEntry, PhotonPipelineResult.serde, new PhotonPipelineResult());
+                                PhotonPipelineResult.photonStruct.getTypeString(),
+                                new byte[] {},
+                                PubSubOption.periodic(0.01),
+                                PubSubOption.sendAll(true),
+                                PubSubOption.pollStorage(20));
+        resultSubscriber = new PacketSubscriber<>(rawBytesEntry, PhotonPipelineResult.photonStruct);
         driverModePublisher = cameraTable.getBooleanTopic("driverModeRequest").publish();
         driverModeSubscriber = cameraTable.getBooleanTopic("driverMode").subscribe(false);
         inputSaveImgEntry = cameraTable.getIntegerTopic("inputSaveImgCmd").getEntry(0);
@@ -163,6 +154,9 @@ public class PhotonCamera implements AutoCloseable {
 
         HAL.report(tResourceType.kResourceType_PhotonCamera, InstanceCount);
         InstanceCount++;
+
+        // HACK - start a TimeSyncServer, if we haven't yet.
+        TimeSyncSingleton.load();
     }
 
     /**
@@ -175,21 +169,70 @@ public class PhotonCamera implements AutoCloseable {
     }
 
     /**
-     * Returns the latest pipeline result.
-     *
-     * @return The latest pipeline result.
+     * The list of pipeline results sent by PhotonVision since the last call to getAllUnreadResults().
+     * Calling this function clears the internal FIFO queue, and multiple calls to
+     * getAllUnreadResults() will return different (potentially empty) result arrays. Be careful to
+     * call this exactly ONCE per loop of your robot code! FIFO depth is limited to 20 changes, so
+     * make sure to call this frequently enough to avoid old results being discarded, too!
      */
+    public List<PhotonPipelineResult> getAllUnreadResults() {
+        verifyVersion();
+
+        List<PhotonPipelineResult> ret = new ArrayList<>();
+
+        // Grab the latest results. We don't care about the timestamps from NT - the metadata header has
+        // this, latency compensated by the Time Sync Client
+        var changes = resultSubscriber.getAllChanges();
+        for (var c : changes) {
+            var result = c.value;
+            checkTimeSyncOrWarn(result);
+            ret.add(result);
+        }
+
+        return ret;
+    }
+
+    /**
+     * Returns the latest pipeline result. This is simply the most recent result Received via NT.
+     * Calling this multiple times will always return the most recent result.
+     *
+     * <p>Replaced by {@link #getAllUnreadResults()} over getLatestResult, as this function can miss
+     * results, or provide duplicate ones!
+     */
+    @Deprecated(since = "2024", forRemoval = true)
     public PhotonPipelineResult getLatestResult() {
         verifyVersion();
 
+        // Grab the latest result. We don't care about the timestamp from NT - the metadata header has
+        // this, latency compensated by the Time Sync Client
         var ret = resultSubscriber.get();
 
-        // Set the timestamp of the result.
-        // getLatestChange returns in microseconds, so we divide by 1e6 to convert to seconds.
-        ret.setRecieveTimestampMicros(RobotController.getFPGATime());
+        if (ret.timestamp == 0) return new PhotonPipelineResult();
 
-        // Return result.
-        return ret;
+        var result = ret.value;
+
+        checkTimeSyncOrWarn(result);
+
+        return result;
+    }
+
+    private void checkTimeSyncOrWarn(PhotonPipelineResult result) {
+        if (result.metadata.timeSinceLastPong > 5L * 1000000L) {
+            if (Timer.getFPGATimestamp() > (prevTimeSyncWarnTime + WARN_DEBOUNCE_SEC)) {
+                prevTimeSyncWarnTime = Timer.getFPGATimestamp();
+
+                DriverStation.reportWarning(
+                        "PhotonVision coprocessor at path "
+                                + path
+                                + " is not connected to the TimeSyncServer? It's been "
+                                + String.format("%.2f", result.metadata.timeSinceLastPong / 1e6)
+                                + "s since the coprocessor last heard a pong.\n\nCheck /photonvision/.timesync/{COPROCESSOR_HOSTNAME} for more information.",
+                        false);
+            }
+        } else {
+            // Got a valid packet, reset the last time
+            prevTimeSyncWarnTime = 0;
+        }
     }
 
     /**
@@ -255,17 +298,12 @@ public class PhotonCamera implements AutoCloseable {
      */
     public VisionLEDMode getLEDMode() {
         int value = (int) ledModeState.get(-1);
-        switch (value) {
-            case 0:
-                return VisionLEDMode.kOff;
-            case 1:
-                return VisionLEDMode.kOn;
-            case 2:
-                return VisionLEDMode.kBlink;
-            case -1:
-            default:
-                return VisionLEDMode.kDefault;
-        }
+        return switch (value) {
+            case 0 -> VisionLEDMode.kOff;
+            case 1 -> VisionLEDMode.kOn;
+            case 2 -> VisionLEDMode.kBlink;
+            default -> VisionLEDMode.kDefault;
+        };
     }
 
     /**
@@ -313,10 +351,19 @@ public class PhotonCamera implements AutoCloseable {
         } else return Optional.empty();
     }
 
-    public Optional<Matrix<N5, N1>> getDistCoeffs() {
+    /**
+     * The camera calibration's distortion coefficients, in OPENCV8 form. Higher-order terms are set
+     * to 0
+     */
+    public Optional<Matrix<N8, N1>> getDistCoeffs() {
         var distCoeffs = cameraDistortionSubscriber.get();
-        if (distCoeffs != null && distCoeffs.length == 5) {
-            return Optional.of(MatBuilder.fill(Nat.N5(), Nat.N1(), distCoeffs));
+        if (distCoeffs != null && distCoeffs.length <= 8) {
+            // Copy into array of length 8, and explicitly null higher order terms out
+            double[] data = new double[8];
+            Arrays.fill(data, 0);
+            System.arraycopy(distCoeffs, 0, data, 0, distCoeffs.length);
+
+            return Optional.of(MatBuilder.fill(Nat.N8(), Nat.N1(), data));
         } else return Optional.empty();
     }
 
@@ -328,7 +375,7 @@ public class PhotonCamera implements AutoCloseable {
         return cameraTable;
     }
 
-    private void verifyVersion() {
+    void verifyVersion() {
         if (!VERSION_CHECK_ENABLED) return;
 
         if ((Timer.getFPGATimestamp() - lastVersionCheckTime) < VERSION_CHECK_INTERVAL) return;
@@ -365,12 +412,23 @@ public class PhotonCamera implements AutoCloseable {
         // Check for connection status. Warn if disconnected.
         else if (!isConnected()) {
             DriverStation.reportWarning(
-                    "PhotonVision coprocessor at path " + path + " is not sending new data.", true);
+                    "PhotonVision coprocessor at path " + path + " is not sending new data.", false);
         }
 
-        // Check for version. Warn if the versions aren't aligned.
         String versionString = versionEntry.get("");
-        if (!versionString.isEmpty() && !PhotonVersion.versionMatches(versionString)) {
+
+        // Check mdef UUID
+        String local_uuid = PhotonPipelineResult.photonStruct.getInterfaceUUID();
+        String remote_uuid = resultSubscriber.getInterfaceUUID();
+
+        if (remote_uuid == null || remote_uuid.isEmpty()) {
+            // not connected yet?
+            DriverStation.reportWarning(
+                    "PhotonVision coprocessor at path "
+                            + path
+                            + " has not reported a message interface UUID - is your coprocessor's camera started?",
+                    false);
+        } else if (!local_uuid.equals(remote_uuid)) {
             // Error on a verified version mismatch
             // But stay silent otherwise
 
@@ -396,8 +454,14 @@ public class PhotonCamera implements AutoCloseable {
             var versionMismatchMessage =
                     "Photon version "
                             + PhotonVersion.versionString
+                            + " (message definition version "
+                            + local_uuid
+                            + ")"
                             + " does not match coprocessor version "
                             + versionString
+                            + " (message definition version "
+                            + remote_uuid
+                            + ")"
                             + "!";
             DriverStation.reportError(versionMismatchMessage, false);
             throw new UnsupportedOperationException(versionMismatchMessage);
